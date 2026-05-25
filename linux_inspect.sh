@@ -9,7 +9,7 @@
 set -euo pipefail
 
 START_TIME=$(date +%s)
-SCRIPT_VERSION="v2.4"
+SCRIPT_VERSION="v2.5"
 SCRIPT_NAME="$(basename "$0")"
 
 # ======================== Bash 版本检查 ========================
@@ -25,6 +25,132 @@ on_error() {
     echo "[ERROR] 脚本第 ${line_no} 行执行失败 (exit ${exit_code})" >&2
 }
 trap 'on_error $LINENO' ERR
+
+# ======================== v2.5 跨发行版兼容 helper ========================
+# 设计原则: 优先现代命令, 失败时优雅降级, 三态 active/inactive/notfound 统一
+
+# 是否有 systemd
+has_systemd() {
+    command -v systemctl &>/dev/null && [[ -d /run/systemd/system ]]
+}
+
+# 多源 OS 检测: 设置全局 OS_ID / OS_FAMILY / OS_PRETTY / OS_VER_MAJOR
+# OS_FAMILY 归一为: rhel | debian | suse | kylin | uos | arch | alpine | gentoo | other
+detect_os() {
+    local id="" id_like="" ver="" pretty=""
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release 2>/dev/null || true
+        id="${ID:-}"
+        id_like="${ID_LIKE:-}"
+        ver="${VERSION_ID:-}"
+        pretty="${PRETTY_NAME:-}"
+    fi
+    [[ -z "$id" && -f /etc/kylin-release  ]] && { id="kylin";   pretty=$(head -1 /etc/kylin-release  2>/dev/null); }
+    [[ -z "$id" && -f /etc/centos-release ]] && { id="centos";  pretty=$(head -1 /etc/centos-release 2>/dev/null); }
+    [[ -z "$id" && -f /etc/redhat-release ]] && { id="rhel";    pretty=$(head -1 /etc/redhat-release 2>/dev/null); }
+    [[ -z "$id" && -f /etc/SuSE-release   ]] && { id="suse";    pretty=$(head -1 /etc/SuSE-release   2>/dev/null); }
+    [[ -z "$id" && -f /etc/debian_version ]] && { id="debian";  pretty="Debian $(cat /etc/debian_version 2>/dev/null)"; }
+    [[ -z "$id" && -f /etc/alpine-release ]] && { id="alpine";  pretty="Alpine $(cat /etc/alpine-release 2>/dev/null)"; }
+    [[ -z "$id" && -f /etc/arch-release   ]] && { id="arch";    pretty="Arch Linux"; }
+    [[ -z "$id" && -f /etc/gentoo-release ]] && { id="gentoo";  pretty=$(head -1 /etc/gentoo-release 2>/dev/null); }
+    [[ -z "$id" && -f /etc/system-release ]] && { id="rhel";    pretty=$(head -1 /etc/system-release 2>/dev/null); }
+    [[ -z "$id" ]] && { id="$(uname -s 2>/dev/null | tr '[:upper:]' '[:lower:]')"; pretty="$(uname -srvm 2>/dev/null)"; }
+
+    case "$id $id_like" in
+        *kylin*|*neokylin*)                                                    OS_FAMILY="kylin" ;;
+        *uos*|*deepin*)                                                        OS_FAMILY="uos" ;;
+        *rhel*|*centos*|*rocky*|*almalinux*|*ol*|*oracle*|*fedora*|*amzn*|*amazon*|*scientific*|*euleros*|*openeuler*|*anolis*|*tencentos*|*alinux*)
+                                                                               OS_FAMILY="rhel" ;;
+        *debian*|*ubuntu*|*kali*|*mint*|*pop*|*raspbian*|*elementary*)         OS_FAMILY="debian" ;;
+        *suse*|*sles*|*opensuse*)                                              OS_FAMILY="suse" ;;
+        *arch*|*manjaro*|*endeavour*|*garuda*)                                 OS_FAMILY="arch" ;;
+        *alpine*)                                                              OS_FAMILY="alpine" ;;
+        *gentoo*)                                                              OS_FAMILY="gentoo" ;;
+        *)                                                                     OS_FAMILY="other" ;;
+    esac
+    OS_ID="${id// /}"
+    OS_PRETTY="${pretty:-$(uname -srvm)}"
+    OS_VER_MAJOR="${ver%%.*}"
+}
+
+# 服务状态: systemctl → service → chkconfig 三轨, 统一输出 active|inactive|notfound
+safe_service_status() {
+    local svc="$1" s=""
+    if has_systemd; then
+        s=$(systemctl is-active "$svc" 2>/dev/null || true)
+        if [[ "$s" == "active" ]]; then echo "active"; return; fi
+        # 检查 unit 是否存在 (区分 inactive / notfound)
+        if printf '%s\n' "${ALL_UNITS:-}" | grep -qw "${svc}.service" 2>/dev/null; then
+            echo "inactive"; return
+        fi
+        # 实时再查一次
+        if systemctl list-unit-files "${svc}.service" --no-pager --no-legend 2>/dev/null | grep -qw "${svc}.service"; then
+            echo "inactive"; return
+        fi
+        echo "notfound"
+        return
+    fi
+    # sysvinit 路径
+    if command -v service &>/dev/null && service "$svc" status &>/dev/null; then
+        echo "active"; return
+    fi
+    if command -v chkconfig &>/dev/null && chkconfig --list 2>/dev/null | grep -qw "$svc"; then
+        echo "inactive"; return
+    fi
+    if [[ -x "/etc/init.d/$svc" ]]; then
+        "/etc/init.d/$svc" status &>/dev/null && echo "active" || echo "inactive"
+        return
+    fi
+    echo "notfound"
+}
+
+# 服务是否开机启用 (best-effort)
+safe_service_enabled() {
+    local svc="$1"
+    if has_systemd; then
+        systemctl is-enabled "$svc" 2>/dev/null || echo "unknown"
+    elif command -v chkconfig &>/dev/null; then
+        chkconfig --list "$svc" 2>/dev/null | awk '{for(i=2;i<=NF;i++) if($i~/:on/){print "enabled"; exit}} END{if(!found)print "disabled"}' \
+            || echo "unknown"
+    else
+        echo "unknown"
+    fi
+}
+
+# 内核日志: dmesg 失败 fallback journalctl -k (5.0+ kernel.dmesg_restrict=1 + 非 root)
+safe_dmesg() {
+    local out
+    out=$(dmesg 2>/dev/null || true)
+    if [[ -z "$out" ]] && command -v journalctl &>/dev/null; then
+        out=$(journalctl -k --no-pager 2>/dev/null | tail -3000 || true)
+    fi
+    printf '%s' "$out"
+}
+
+# 容器 cmd: 优先 docker, 否则 podman (RHEL 8+ / Fedora 31+ 默认)
+container_cmd() {
+    if command -v docker &>/dev/null && docker info &>/dev/null; then
+        echo "docker"; return
+    fi
+    if command -v podman &>/dev/null && podman info &>/dev/null; then
+        echo "podman"; return
+    fi
+    echo ""
+}
+
+# 时区检测多源
+detect_timezone() {
+    local tz=""
+    if command -v timedatectl &>/dev/null; then
+        tz=$(timedatectl 2>/dev/null | awk -F': *' '/Time zone/{print $2; exit}' | awk '{print $1}')
+    fi
+    [[ -z "$tz" && -r /etc/timezone     ]] && tz=$(head -1 /etc/timezone 2>/dev/null)
+    [[ -z "$tz" && -L /etc/localtime    ]] && tz=$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')
+    [[ -z "$tz" && -r /etc/sysconfig/clock ]] && tz=$(awk -F'"' '/^ZONE=/{print $2; exit}' /etc/sysconfig/clock 2>/dev/null)
+    [[ -z "$tz" ]] && tz="N/A"
+    printf '%s' "$tz"
+}
 
 # ======================== 配置区 ========================
 # 输出
@@ -556,9 +682,22 @@ log_step "采集基本信息（主机/CPU/内存/网络/虚拟化）..."
 
 HOSTNAME_VAL=$(hostname)
 HOSTNAME_FQDN=$(hostname -f 2>/dev/null || echo "$HOSTNAME_VAL")
-IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "N/A")
-IP_ALL=$(hostname -I 2>/dev/null | xargs || echo "N/A")
-OS_VERSION=$(grep "PRETTY_NAME" /etc/os-release 2>/dev/null | cut -d'"' -f2 || uname -s)
+# v2.5: hostname -I → ip addr → ifconfig 三级 fallback (最小化镜像可能无 iproute2)
+IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [[ -z "$IP_ADDR" || "$IP_ADDR" == "N/A" ]]; then
+    if command -v ip &>/dev/null; then
+        IP_ADDR=$(ip -4 addr show 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | head -1 | cut -d/ -f1)
+    elif command -v ifconfig &>/dev/null; then
+        IP_ADDR=$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | head -1)
+    fi
+fi
+IP_ADDR="${IP_ADDR:-N/A}"
+IP_ALL=$(hostname -I 2>/dev/null | xargs)
+[[ -z "$IP_ALL" ]] && IP_ALL=$(ip -4 -o addr show 2>/dev/null | awk '$2!="lo"{print $4}' | cut -d/ -f1 | xargs 2>/dev/null)
+[[ -z "$IP_ALL" ]] && IP_ALL=$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | grep -v '^127\.' | xargs 2>/dev/null)
+IP_ALL="${IP_ALL:-N/A}"
+detect_os                                   # v2.5: 多源 OS 检测 → OS_ID / OS_FAMILY / OS_PRETTY / OS_VER_MAJOR
+OS_VERSION="$OS_PRETTY"
 KERNEL=$(uname -r)
 ARCH=$(uname -m)
 UPTIME=$(uptime -p 2>/dev/null || uptime | sed 's/.*up /up /' | sed 's/,.*load.*//')
@@ -579,18 +718,30 @@ if command -v getenforce &>/dev/null; then
 else
     SELINUX_STATUS="未安装"
 fi
-TIMEZONE=$(timedatectl 2>/dev/null | grep "Time zone" | awk '{print $3}' || cat /etc/timezone 2>/dev/null || echo "N/A")
+TIMEZONE=$(detect_timezone)                 # v2.5: timedatectl / /etc/timezone / readlink /etc/localtime / sysconfig/clock 四源 fallback
 LOCALE=$(echo "$LANG" 2>/dev/null || echo "N/A")
-DEFAULT_GW=$(ip route 2>/dev/null | awk '/default/{print $3}' | head -1 || echo "N/A")
+# v2.5: ip route → netstat -rn → route -n 三级 fallback
+DEFAULT_GW=$(ip route 2>/dev/null | awk '/^default/{print $3; exit}')
+[[ -z "$DEFAULT_GW" ]] && DEFAULT_GW=$(netstat -rn 2>/dev/null | awk '/^0\.0\.0\.0|^default/{print $2; exit}')
+[[ -z "$DEFAULT_GW" ]] && DEFAULT_GW=$(route -n 2>/dev/null | awk '/^0\.0\.0\.0/{print $2; exit}')
+DEFAULT_GW="${DEFAULT_GW:-N/A}"
 DNS_SERVERS=$(grep "^nameserver" /etc/resolv.conf 2>/dev/null | awk '{print $2}' | xargs || echo "N/A")
+# v2.5: 防火墙状态多源识别 (firewalld → ufw → nftables → iptables → SuSEfirewall2), systemd 与 sysvinit 双轨
 FIREWALL_STATUS="inactive"
-if systemctl is-active firewalld &>/dev/null; then
-    FIREWALL_STATUS="firewalld (active)"
-elif systemctl is-active ufw &>/dev/null; then
-    FIREWALL_STATUS="ufw (active)"
-elif systemctl is-active iptables &>/dev/null; then
-    FIREWALL_STATUS="iptables (active)"
+for fw in firewalld ufw nftables iptables SuSEfirewall2; do
+    s=$(safe_service_status "$fw")
+    if [[ "$s" == "active" ]]; then
+        FIREWALL_STATUS="${fw} (active)"
+        break
+    fi
+done
+# 最后兜底: 即便没有服务管理也可以从规则表判断 iptables 有无规则
+if [[ "$FIREWALL_STATUS" == "inactive" ]] && command -v iptables &>/dev/null; then
+    if iptables -L -n 2>/dev/null | grep -qE '^(ACCEPT|DROP|REJECT)'; then
+        FIREWALL_STATUS="iptables (规则存在, 服务状态未知)"
+    fi
 fi
+unset s
 
 # 硬件信息
 VENDOR=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || echo "N/A")
@@ -766,6 +917,7 @@ while IFS= read -r line; do
 done <<< "$(df -iP 2>/dev/null | grep -vE "^Filesystem|tmpfs|devtmpfs|overlay" || true)"
 
 # 磁盘 I/O 统计
+# v2.5: 最小化系统常无 sysstat (iostat) 包, fallback 解析 /proc/diskstats
 log_step "检查磁盘 I/O 性能..."
 DISK_IO_ROWS=""
 if command -v iostat &>/dev/null; then
@@ -774,10 +926,21 @@ if command -v iostat &>/dev/null; then
         tps=$(echo "$line" | awk '{print $2}')
         read_s=$(echo "$line" | awk '{print $3}')
         write_s=$(echo "$line" | awk '{print $4}')
-        await=""
         [[ "$dev" =~ ^loop|^ram ]] && continue
         DISK_IO_ROWS+="<tr><td>${dev}</td><td>${tps}</td><td>${read_s}</td><td>${write_s}</td></tr>"
     done <<< "$(iostat -d 2>/dev/null | awk 'NR>3 && NF>0{print}' || true)"
+elif [[ -r /proc/diskstats ]]; then
+    # /proc/diskstats 字段: major minor name reads merges read_sectors read_ms writes merges_w write_sectors write_ms in_flight io_ms io_weighted
+    while IFS= read -r line; do
+        dev=$(echo "$line" | awk '{print $3}')
+        reads=$(echo "$line" | awk '{print $4}')
+        writes=$(echo "$line" | awk '{print $8}')
+        rd_kb=$(echo "$line" | awk '{print $6*512/1024}')   # 扇区→KB
+        wr_kb=$(echo "$line" | awk '{print $10*512/1024}')
+        [[ "$dev" =~ ^loop|^ram|^dm- ]] && continue
+        [[ -z "$dev" || "$reads" == "0" && "$writes" == "0" ]] && continue
+        DISK_IO_ROWS+="<tr><td>${dev}</td><td>${reads}r/${writes}w</td><td>${rd_kb} KB</td><td>${wr_kb} KB</td></tr>"
+    done <<< "$(awk 'NF>=10{print}' /proc/diskstats 2>/dev/null || true)"
 fi
 
 # 大文件 TOP N（限制搜索范围提高性能；可用 --no-large-file-scan 跳过）
@@ -868,7 +1031,10 @@ LISTEN_PORTS=$(ss -tlnp 2>/dev/null | awk 'NR>1 {
 }' | head -30)
 
 # 路由表
-ROUTE_TABLE=$(ip route 2>/dev/null | head -20 | while IFS= read -r line; do echo "<tr><td>$(html_escape "$line")</td></tr>"; done || echo "")
+# v2.5: ip route → netstat -rn → route -n
+ROUTE_RAW=$(ip route 2>/dev/null || netstat -rn 2>/dev/null || route -n 2>/dev/null || echo "")
+ROUTE_TABLE=$(echo "$ROUTE_RAW" | head -20 | while IFS= read -r line; do [[ -n "$line" ]] && echo "<tr><td>$(html_escape "$line")</td></tr>"; done || echo "")
+unset ROUTE_RAW
 
 # ======================== 进程检查 ========================
 log_step "检查进程状态（僵尸/D状态/长运行）..."
@@ -945,12 +1111,11 @@ if [[ -r /etc/shadow ]]; then
     done < /etc/shadow 2>/dev/null || true
 fi
 
-# 最近登录失败（lastb需要root权限）
+# 最近登录失败（lastb 需 root + /var/log/btmp 存在; 最小化镜像/容器常无 btmp）
 FAIL_LOGINS=""
 FAIL_COUNT="0"
-if [[ "$(id -u)" -eq 0 ]]; then
+if [[ "$(id -u)" -eq 0 ]] && [[ -r /var/log/btmp ]] && command -v lastb &>/dev/null; then
     FAIL_LOGINS=$(lastb 2>/dev/null | head -10 | awk 'NF>3{printf "<tr><td>%s</td><td>%s</td><td>%s %s %s</td></tr>\n", $1, $3, $4, $5, $6}' || echo "")
-    # grep -c 找不到匹配时 exit 1 + pipefail → pipeline 失败 + `|| echo "0"` 把 0 拼在 grep 输出后, 用 || true + sanitize 取代
     FAIL_COUNT=$(lastb 2>/dev/null | grep -c "." 2>/dev/null || true)
     FAIL_COUNT=${FAIL_COUNT//[^0-9]/}; FAIL_COUNT=${FAIL_COUNT:-0}
 fi
@@ -999,55 +1164,62 @@ for user_cron in /var/spool/cron/crontabs/* /var/spool/cron/*; do
 done
 
 # ======================== 服务检查 ========================
-log_step "检查关键服务状态（systemctl）..."
-SERVICES=("sshd" "crond" "cron" "rsyslog" "syslog-ng" "firewalld" "ufw" "chronyd" "ntpd" "systemd-timesyncd" "docker" "containerd" "kubelet" "nginx" "httpd" "apache2" "mysqld" "mariadb" "postgresql" "redis-server" "redis" "mongod" "elasticsearch" "php-fpm" "tomcat" "supervisord" "zabbix-agent" "zabbix-agent2" "node_exporter" "prometheus" "grafana-server" "haproxy" "keepalived" "named" "dnsmasq" "postfix" "dovecot" "vsftpd" "smbd")
+# v2.5: 通过 safe_service_status 走 systemctl → service → chkconfig → init.d 四级 fallback
+#       CentOS 6 / RHEL 6 / 老 SUSE / 容器内 (无 systemd) 都能正确识别
+log_step "检查关键服务状态（systemctl/service/chkconfig 自适应）..."
+SERVICES=("sshd" "crond" "cron" "rsyslog" "syslog-ng" "firewalld" "ufw" "nftables" "iptables" "chronyd" "chrony" "ntpd" "ntp" "systemd-timesyncd" "openntpd" "docker" "podman" "containerd" "kubelet" "nginx" "httpd" "apache2" "mysqld" "mariadb" "postgresql" "redis-server" "redis" "mongod" "elasticsearch" "php-fpm" "tomcat" "supervisord" "zabbix-agent" "zabbix-agent2" "node_exporter" "prometheus" "grafana-server" "haproxy" "keepalived" "named" "bind9" "dnsmasq" "postfix" "dovecot" "vsftpd" "smbd" "winbind" "sssd" "NetworkManager")
 SVC_ROWS=""
-# 提速：list-unit-files 调用一次缓存（避免每个服务都 fork）
-ALL_UNITS=$(systemctl list-unit-files --type=service --no-pager --no-legend 2>/dev/null | awk '{print $1}' || true)
+# 提速: 一次性把 systemd unit-files 缓存到 ALL_UNITS, safe_service_status 内部用
+if has_systemd; then
+    ALL_UNITS=$(systemctl list-unit-files --type=service --no-pager --no-legend 2>/dev/null | awk '{print $1}' || true)
+else
+    ALL_UNITS=""
+fi
 for svc in "${SERVICES[@]}"; do
-    if grep -qw "^${svc}\.service$" <<< "$ALL_UNITS"; then
-        status=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
-        enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "unknown")
-        if [[ "$status" == "active" ]]; then
-            badge='<span class="badge ok">运行中</span>'
-        elif [[ "$status" == "inactive" ]]; then
-            badge='<span class="badge warning">已停止</span>'
-        else
-            badge='<span class="badge critical">异常</span>'
-        fi
-        SVC_ROWS+="<tr><td>${svc}</td><td>${badge}</td><td>${enabled}</td></tr>"
+    status=$(safe_service_status "$svc")
+    [[ "$status" == "notfound" ]] && continue   # 该服务在本机不存在,不展示
+    enabled=$(safe_service_enabled "$svc")
+    if [[ "$status" == "active" ]]; then
+        badge='<span class="badge ok">运行中</span>'
+    elif [[ "$status" == "inactive" ]]; then
+        badge='<span class="badge warning">已停止</span>'
+    else
+        badge='<span class="badge critical">异常</span>'
     fi
+    SVC_ROWS+="<tr><td>${svc}</td><td>${badge}</td><td>${enabled}</td></tr>"
 done
 
-# 最近失败的服务
-FAILED_SVCS=$(systemctl --failed --no-pager 2>/dev/null | grep "loaded" | awk '{printf "<tr><td>%s</td><td><span class=\"badge critical\">FAILED</span></td><td>%s</td></tr>\n", $2, $4}' || echo "")
+# 最近失败的服务 (仅 systemd; sysvinit 没这个概念)
+if has_systemd; then
+    FAILED_SVCS=$(systemctl --failed --no-pager 2>/dev/null | grep "loaded" | awk '{printf "<tr><td>%s</td><td><span class=\"badge critical\">FAILED</span></td><td>%s</td></tr>\n", $2, $4}' || echo "")
+else
+    FAILED_SVCS=""
+fi
 
 # ======================== Docker 检查 ========================
 log_step "检查 Docker 容器..."
 DOCKER_ROWS=""
 DOCKER_IMAGES=""
-if command -v docker &>/dev/null; then
-    if docker info &>/dev/null; then
-        log_debug "Docker 已安装且可访问"
-        DOCKER_VERSION=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "N/A")
-        DOCKER_CONTAINERS=$(docker ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || true)
-        while IFS= read -r line; do
-            name=$(echo "$line" | awk '{print $1}')
-            image=$(echo "$line" | awk '{print $2}')
-            status=$(echo "$line" | awk '{print $3, $4, $5}')
-            badge='<span class="badge ok">运行中</span>'
-            if echo "$status" | grep -qi "exited\|dead\|created"; then
-                badge='<span class="badge warning">已停止</span>'
-            fi
-            DOCKER_ROWS+="<tr><td>${name}</td><td>${image}</td><td>${status}</td><td>${badge}</td></tr>"
-        done <<< "$(docker ps -a --format "{{.Names}} {{.Image}} {{.Status}}" 2>/dev/null || true)"
-        DOCKER_IMAGES=$(docker images --format "{{.Repository}}:{{.Tag}} {{.Size}}" 2>/dev/null | head -15 | while read -r img size; do echo "<tr><td>${img}</td><td>${size}</td></tr>"; done || true)
-        DOCKER_DISK=$(docker system df 2>/dev/null || true)
-    else
-        log_debug "Docker 检查跳过（权限不足或未启动）"
-    fi
+# v2.5: 优先 docker,否则 podman (RHEL 8+ / Fedora 31+ 默认), 两者 CLI 兼容
+CTR_CMD=$(container_cmd)
+if [[ -n "$CTR_CMD" ]]; then
+    log_debug "容器运行时: ${CTR_CMD}"
+    DOCKER_VERSION=$("$CTR_CMD" version --format '{{.Server.Version}}' 2>/dev/null || "$CTR_CMD" --version 2>/dev/null | awk '{print $NF}' || echo "N/A")
+    DOCKER_CONTAINERS=$("$CTR_CMD" ps -a --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null || true)
+    while IFS= read -r line; do
+        name=$(echo "$line" | awk '{print $1}')
+        image=$(echo "$line" | awk '{print $2}')
+        status=$(echo "$line" | awk '{print $3, $4, $5}')
+        badge='<span class="badge ok">运行中</span>'
+        if echo "$status" | grep -qi "exited\|dead\|created"; then
+            badge='<span class="badge warning">已停止</span>'
+        fi
+        DOCKER_ROWS+="<tr><td>${name}</td><td>${image}</td><td>${status}</td><td>${badge}</td></tr>"
+    done <<< "$("$CTR_CMD" ps -a --format "{{.Names}} {{.Image}} {{.Status}}" 2>/dev/null || true)"
+    DOCKER_IMAGES=$("$CTR_CMD" images --format "{{.Repository}}:{{.Tag}} {{.Size}}" 2>/dev/null | head -15 | while read -r img size; do echo "<tr><td>${img}</td><td>${size}</td></tr>"; done || true)
+    DOCKER_DISK=$("$CTR_CMD" system df 2>/dev/null || true)
 else
-    log_debug "Docker 未安装"
+    log_debug "未检测到 Docker / Podman"
 fi
 
 # ======================== 内核参数 ========================
@@ -1083,18 +1255,9 @@ fi
 UPDATE_INFO="N/A"
 UPDATE_COUNT=0
 LAST_UPDATE="N/A"
-OS_TYPE="unknown"
 SEC_UPDATES=""
-
-if [[ -f /etc/kylin-release ]]; then
-    OS_TYPE="kylin"
-elif [[ -f /etc/redhat-release ]]; then
-    OS_TYPE="rhel"
-elif [[ -f /etc/debian_version ]]; then
-    OS_TYPE="debian"
-elif [[ -f /etc/SuSE-release ]]; then
-    OS_TYPE="suse"
-fi
+# v2.5: 直接复用 detect_os 的 OS_FAMILY (兼容更多发行版), 不再单独识别
+OS_TYPE="${OS_FAMILY:-other}"
 
 check_updates() {
     local pkg_manager=$1
@@ -1142,17 +1305,41 @@ check_updates() {
                 return 0
             fi
             ;;
+        pacman)
+            # v2.5: Arch / Manjaro
+            if command -v pacman &>/dev/null; then
+                UPDATE_COUNT=$( { checkupdates 2>/dev/null || pacman -Qu 2>/dev/null; } | grep -c . || true)
+                UPDATE_COUNT=${UPDATE_COUNT//[^0-9]/}; UPDATE_COUNT=${UPDATE_COUNT:-0}
+                UPDATE_INFO="pacman: ${UPDATE_COUNT} 个可用更新"
+                LAST_UPDATE=$(awk '/upgraded|installed/{t=$1" "$2} END{print t}' /var/log/pacman.log 2>/dev/null | tr -d '[]' || echo "N/A")
+                return 0
+            fi
+            ;;
+        apk)
+            # v2.5: Alpine
+            if command -v apk &>/dev/null; then
+                apk update >/dev/null 2>&1 || true
+                UPDATE_COUNT=$(apk version -l '<' 2>/dev/null | grep -c . || true)
+                UPDATE_COUNT=${UPDATE_COUNT//[^0-9]/}; UPDATE_COUNT=${UPDATE_COUNT:-0}
+                UPDATE_INFO="apk: ${UPDATE_COUNT} 个可用更新"
+                LAST_UPDATE=$(stat -c %y /var/cache/apk 2>/dev/null | cut -d' ' -f1 || echo "N/A")
+                return 0
+            fi
+            ;;
     esac
     return 1
 }
 
 if (( SKIP_UPDATE_CHECK == 0 )); then
+    # v2.5: OS_FAMILY 路由到包管理器, 最终兜底全试一遍 (容器/混合系统也能覆盖)
     case "$OS_TYPE" in
-        kylin)  check_updates dnf || check_updates yum || check_updates apt ;;
-        rhel)   check_updates dnf || check_updates yum ;;
-        debian) check_updates apt ;;
-        suse)   check_updates zypper ;;
-        *)      check_updates dnf || check_updates yum || check_updates apt || check_updates zypper ;;
+        kylin|uos) check_updates dnf || check_updates yum || check_updates apt ;;
+        rhel)      check_updates dnf || check_updates yum ;;
+        debian)    check_updates apt ;;
+        suse)      check_updates zypper ;;
+        arch)      check_updates pacman ;;
+        alpine)    check_updates apk ;;
+        *)         check_updates dnf || check_updates yum || check_updates apt || check_updates zypper || check_updates pacman || check_updates apk ;;
     esac
 
     # 安全更新计数 (同样的 grep -c + pipefail 坑, 用 || true + 数字 sanitize)
@@ -1190,8 +1377,9 @@ else
     SYSLOG_ERRORS=$(journalctl -p err --no-pager -n "$LOG_LINES" 2>/dev/null || echo "无法读取日志")
 fi
 
-# 提速：dmesg 一次性缓存供 OOM + 硬件错误共用
-DMESG_CACHE=$(dmesg 2>/dev/null || true)
+# 提速: dmesg 一次性缓存供 OOM + 硬件错误共用
+# v2.5: 内核 5.0+ 默认 dmesg_restrict=1 + 非 root 会失败, 改 safe_dmesg() 走 journalctl -k fallback
+DMESG_CACHE=$(safe_dmesg)
 
 # OOM 检查
 OOM_COUNT=$(echo "$DMESG_CACHE" | grep -ci "oom\|out of memory" 2>/dev/null || true)
@@ -1213,25 +1401,35 @@ elif [[ -f /var/log/secure ]]; then
 fi
 
 # ======================== NTP 时间同步 ========================
+# v2.5: chronyd / ntpd (ntpq/ntpstat) / systemd-timesyncd / openntpd 四套时间源全识别
 log_step "检查 NTP 时间同步..."
 NTP_STATUS="未配置"
 NTP_BADGE='<span class="badge warning">警告</span>'
 NTP_DETAIL=""
-if command -v chronyc &>/dev/null; then
-    NTP_STATUS=$(chronyc tracking 2>/dev/null | grep "Leap status" | cut -d: -f2 | xargs || echo "未同步")
+if command -v chronyc &>/dev/null && safe_service_status chronyd 2>/dev/null | grep -qE "active|inactive"; then
+    NTP_STATUS=$(chronyc tracking 2>/dev/null | awk -F': *' '/Leap status/{print $2; exit}' | xargs || echo "未同步")
     NTP_DETAIL=$(chronyc sources 2>/dev/null | head -10 || true)
-    if [[ "$NTP_STATUS" == "Normal" ]]; then
-        NTP_BADGE='<span class="badge ok">正常</span>'
-    fi
+    [[ "$NTP_STATUS" == "Normal" ]] && NTP_BADGE='<span class="badge ok">正常</span>' && NTP_STATUS="已同步 (chronyd)"
+elif command -v ntpq &>/dev/null && ntpq -pn 2>/dev/null | grep -qE '^\*'; then
+    NTP_STATUS="已同步 (ntpd)"
+    NTP_BADGE='<span class="badge ok">正常</span>'
+    NTP_DETAIL=$(ntpq -pn 2>/dev/null | head -10 || true)
 elif command -v ntpstat &>/dev/null; then
     if ntpstat &>/dev/null; then
-        NTP_STATUS="已同步"
+        NTP_STATUS="已同步 (ntpd)"
         NTP_BADGE='<span class="badge ok">正常</span>'
     else
         NTP_STATUS="未同步"
     fi
-elif timedatectl 2>/dev/null | grep -q "synchronized: yes"; then
-    NTP_STATUS="已同步(systemd-timesyncd)"
+elif command -v timedatectl &>/dev/null && timedatectl show 2>/dev/null | grep -q '^NTPSynchronized=yes'; then
+    NTP_STATUS="已同步 (systemd-timesyncd)"
+    NTP_BADGE='<span class="badge ok">正常</span>'
+elif timedatectl 2>/dev/null | grep -qE "synchronized:[[:space:]]+yes|NTP synchronized:[[:space:]]+yes"; then
+    NTP_STATUS="已同步 (systemd-timesyncd)"
+    NTP_BADGE='<span class="badge ok">正常</span>'
+elif command -v ntpctl &>/dev/null && ntpctl -s status 2>/dev/null | grep -q 'clock synced'; then
+    # OpenBSD/Alpine 上的 openntpd
+    NTP_STATUS="已同步 (openntpd)"
     NTP_BADGE='<span class="badge ok">正常</span>'
 fi
 

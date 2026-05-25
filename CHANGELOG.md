@@ -8,6 +8,37 @@
 
 ## 版本历史
 
+### v2.5 (2026-05-25) - 跨发行版兼容大改 + 健壮性修复
+
+**核心目标**: 一份脚本跑遍主流 Linux 发行版,不挑食、不假设环境
+
+#### 修复 (来自实战反馈)
+
+1. **CRLF 行尾兼容** — CentOS 7 用户反馈跑到 17/19 步 NTP 时 `syntax error near unexpected token '<'`。根因: 脚本副本是 CRLF 行尾, bash 把 `done\r` 后面的 `<` 当意外 token。修复: 加 `.gitattributes` 锁 `*.sh / *.bash` 为 `eol=lf`, 防止 Windows checkout 自动转 CRLF
+2. **`set -o pipefail` + `grep -c ...|| echo "0"` 反模式** — Rocky Linux 9 跑到 L1841 `(( UPDATE_COUNT > 0 ))` 报 `((: 158\n0: syntax error`。根因: `yum/dnf check-update` 有更新时故意 exit 100, pipefail 让 pipeline 失败, 触发 `|| echo "0"` 把 `0` 拼在 grep 已输出的 `158` 之后, 变量成 `"158\n0"`。修了 6 处 (UPDATE_COUNT × 4 + FAIL_COUNT + SEC_UPDATES × 4 + OOM_COUNT), 改用 `|| true` + `VAR=${VAR//[^0-9]/}` 双重 sanitize
+
+#### 跨发行版兼容 (新增 ~200 行 helper 与降级路径)
+
+3. **多源 OS 识别** `detect_os()` — `/etc/os-release` → `/etc/kylin-release` → `/etc/centos-release` → `/etc/redhat-release` → `/etc/SuSE-release` → `/etc/debian_version` → `/etc/alpine-release` → `/etc/arch-release` → `/etc/gentoo-release` → `/etc/system-release` → `uname -s` 十一级 fallback;输出归一的 `OS_FAMILY` (rhel/debian/suse/kylin/uos/arch/alpine/gentoo/other), 覆盖 RHEL/CentOS/Rocky/Alma/Oracle/Fedora/Amazon Linux/openEuler/Anolis/TencentOS/Alibaba Cloud Linux/EulerOS/Scientific/Ubuntu/Debian/Kali/Mint/Pop!_OS/Raspbian/Elementary/Deepin/SUSE/openSUSE/Kylin/NeoKylin/UOS/Arch/Manjaro/EndeavourOS/Garuda/Alpine/Gentoo 等 30+ 发行版
+4. **服务管理双轨** `safe_service_status()` / `safe_service_enabled()` — `systemctl is-active` → `service xxx status` → `chkconfig --list` → `/etc/init.d/xxx status` 四级 fallback, 兼容 CentOS 6 / RHEL 6 / 老 SUSE / 无 systemd 容器
+5. **防火墙多识别** — 同时检测 `firewalld` / `ufw` / `nftables` / `iptables` / `SuSEfirewall2`, 服务管理走双轨; 最后兜底用 `iptables -L` 看有无规则推断
+6. **时区检测多源** `detect_timezone()` — `timedatectl` → `/etc/timezone` → `readlink /etc/localtime` → `/etc/sysconfig/clock` 四级 fallback
+7. **dmesg 权限/可用性** `safe_dmesg()` — 内核 5.0+ 默认 `kernel.dmesg_restrict=1` + 非 root 跑 dmesg 失败时, 自动 fallback `journalctl -k --no-pager`
+8. **NTP 时间同步四套全识别** — `chronyd` (chronyc) / `ntpd` (ntpq) / `ntpstat` / `systemd-timesyncd` (timedatectl) / `openntpd` (ntpctl), 主动判 `^\\*` peer / `NTPSynchronized=yes` 等多种"已同步"信号
+9. **iostat fallback** — 没装 sysstat 包时, 改读 `/proc/diskstats`, 解析扇区数 × 512 得到 KB 量
+10. **网络命令双轨** — `hostname -I` → `ip addr` → `ifconfig` 三级 IP 获取; `ip route` → `netstat -rn` → `route -n` 三级路由获取
+11. **容器运行时** — Docker 优先, 失败 fallback `podman` (RHEL 8+ / Fedora 31+ 默认), CLI 兼容直接复用同一套代码
+12. **包管理器扩展** — 在 yum/dnf/apt/zypper 基础上加 `pacman` (Arch/Manjaro) + `apk` (Alpine), `checkupdates` 优先 pacman 数据库不需 root
+13. **`lastb` 守护** — 同时判断 root + `/var/log/btmp` 可读 + `lastb` 命令存在, 三条件全满足才执行, 避免最小化镜像/容器无 btmp 时空跑
+14. **服务列表大扩** — 38 → 47 个监控对象, 新增 `chrony` / `ntp` / `openntpd` / `podman` / `nftables` / `bind9` / `winbind` / `sssd` / `NetworkManager` 等
+
+#### 文档
+
+15. README 加 **兼容性矩阵** (列明每个发行版的测试状态) + **已修复踩坑表** + **架构说明**
+16. RELEASE_NOTES_v2.5.md 列详细发布说明 + 升级指引 + Known Issues
+
+---
+
 ### v2.4 (2026-05-10) - 提速 + 排版重构 + Token Insight 风模板
 
 **第二轮 HTML 重构（参照 Token Insight 报告样式）：**
