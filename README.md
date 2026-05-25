@@ -227,11 +227,14 @@ Linux_Auto_Inspection/
 ├── .gitattributes                  # 锁定 *.sh 为 LF 行尾
 ├── README.md                       # 本文件
 ├── CHANGELOG.md                    # 完整版本历史 (v2.0 → v2.5)
-├── RELEASE_NOTES_v2.5.md           # v2.5 详细发布说明
 ├── CONTRIBUTING.md                 # 贡献指南
 ├── LICENSE                         # MIT
-└── docs/
-    └── report-preview.png          # 报告样张
+├── docs/
+│   └── report-preview.png          # 报告样张
+└── history/                        # 历史版本发布说明 + 代码审查归档
+    ├── RELEASE_NOTES_v2.5.md       # v2.5 发布说明
+    ├── RELEASE_NOTES_v2.4.md       # v2.4 发布说明
+    └── linux_inspect_script_analysis.md  # v2.0-v2.3 代码缺陷分析档案
 ```
 
 ## License
@@ -246,4 +249,4 @@ MIT License — 见 [LICENSE](LICENSE)
 
 如果你在没列入兼容矩阵的发行版上跑通了 (或踩了新坑), 欢迎开 issue / PR。
 
-完整版本历史见 [CHANGELOG.md](CHANGELOG.md), v2.5 发布详情见 [RELEASE_NOTES_v2.5.md](RELEASE_NOTES_v2.5.md)。
+完整版本历史见 [CHANGELOG.md](CHANGELOG.md), v2.5 发布详情见 [history/RELEASE_NOTES_v2.5.md](history/RELEASE_NOTES_v2.5.md)。
