@@ -1,0 +1,17 @@
+# Shell 脚本必须用 LF 行尾,否则 Linux bash 解析 CRLF 时
+# 在 process substitution / here-string 等紧凑语法处会 "syntax error near unexpected token"
+*.sh        text eol=lf
+*.bash      text eol=lf
+
+# 文档保持文本属性 (git 自动识别)
+*.md        text
+*.txt       text
+LICENSE     text
+
+# 二进制
+*.png       binary
+*.jpg       binary
+*.gif       binary
+*.ico       binary
+*.zip       binary
+*.tar.gz    binary
