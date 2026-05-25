@@ -950,7 +950,9 @@ FAIL_LOGINS=""
 FAIL_COUNT="0"
 if [[ "$(id -u)" -eq 0 ]]; then
     FAIL_LOGINS=$(lastb 2>/dev/null | head -10 | awk 'NF>3{printf "<tr><td>%s</td><td>%s</td><td>%s %s %s</td></tr>\n", $1, $3, $4, $5, $6}' || echo "")
-    FAIL_COUNT=$(lastb 2>/dev/null | grep -c "." 2>/dev/null || echo "0")
+    # grep -c 找不到匹配时 exit 1 + pipefail → pipeline 失败 + `|| echo "0"` 把 0 拼在 grep 输出后, 用 || true + sanitize 取代
+    FAIL_COUNT=$(lastb 2>/dev/null | grep -c "." 2>/dev/null || true)
+    FAIL_COUNT=${FAIL_COUNT//[^0-9]/}; FAIL_COUNT=${FAIL_COUNT:-0}
 fi
 
 # 最近成功登录
@@ -1099,7 +1101,10 @@ check_updates() {
     case "$pkg_manager" in
         yum)
             if command -v yum &>/dev/null; then
-                UPDATE_COUNT=$(yum check-update --quiet 2>/dev/null | grep -cE "^[a-zA-Z]" || echo "0")
+                # yum check-update 有更新时 exit 100, 加上 set -o pipefail 会让 pipeline 整体失败
+                # 用 || true 吞退出码, 再用 sanitize 确保是纯数字 (避免 "158\n0" 这种被 grep 输出 + echo fallback 拼出来的脏数据)
+                UPDATE_COUNT=$(yum check-update --quiet 2>/dev/null | grep -cE "^[a-zA-Z]" || true)
+                UPDATE_COUNT=${UPDATE_COUNT//[^0-9]/}; UPDATE_COUNT=${UPDATE_COUNT:-0}
                 UPDATE_INFO="yum: ${UPDATE_COUNT} 个可用更新"
                 LAST_UPDATE=$(rpm -qa --last 2>/dev/null | head -1 | awk '{print $2, $3, $4, $5}' || echo "N/A")
                 return 0
@@ -1107,7 +1112,9 @@ check_updates() {
             ;;
         dnf)
             if command -v dnf &>/dev/null; then
-                UPDATE_COUNT=$(dnf check-update --quiet 2>/dev/null | grep -cE "^[a-zA-Z]" || echo "0")
+                # dnf check-update 同 yum: 有更新时 exit 100
+                UPDATE_COUNT=$(dnf check-update --quiet 2>/dev/null | grep -cE "^[a-zA-Z]" || true)
+                UPDATE_COUNT=${UPDATE_COUNT//[^0-9]/}; UPDATE_COUNT=${UPDATE_COUNT:-0}
                 UPDATE_INFO="dnf: ${UPDATE_COUNT} 个可用更新"
                 LAST_UPDATE=$(rpm -qa --last 2>/dev/null | head -1 | awk '{print $2, $3, $4, $5}' || echo "N/A")
                 return 0
@@ -1118,7 +1125,9 @@ check_updates() {
                 if [[ "$(id -u)" -eq 0 ]]; then
                     apt update -qq 2>/dev/null || true
                 fi
-                UPDATE_COUNT=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || echo "0")
+                # grep -c 找不到匹配时 exit 1, pipefail 会让 pipeline 失败
+                UPDATE_COUNT=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || true)
+                UPDATE_COUNT=${UPDATE_COUNT//[^0-9]/}; UPDATE_COUNT=${UPDATE_COUNT:-0}
                 UPDATE_INFO="apt: ${UPDATE_COUNT} 个可用更新"
                 LAST_UPDATE=$(stat -c %y /var/cache/apt/pkgcache.bin 2>/dev/null | cut -d' ' -f1 || echo "N/A")
                 return 0
@@ -1126,7 +1135,8 @@ check_updates() {
             ;;
         zypper)
             if command -v zypper &>/dev/null; then
-                UPDATE_COUNT=$(zypper list-updates 2>/dev/null | grep -c "^v" || echo "0")
+                UPDATE_COUNT=$(zypper list-updates 2>/dev/null | grep -c "^v" || true)
+                UPDATE_COUNT=${UPDATE_COUNT//[^0-9]/}; UPDATE_COUNT=${UPDATE_COUNT:-0}
                 UPDATE_INFO="zypper: ${UPDATE_COUNT} 个可用更新"
                 LAST_UPDATE=$(rpm -qa --last 2>/dev/null | head -1 | awk '{print $2, $3, $4, $5}' || echo "N/A")
                 return 0
@@ -1145,19 +1155,18 @@ if (( SKIP_UPDATE_CHECK == 0 )); then
         *)      check_updates dnf || check_updates yum || check_updates apt || check_updates zypper ;;
     esac
 
+    # 安全更新计数 (同样的 grep -c + pipefail 坑, 用 || true + 数字 sanitize)
     if command -v dnf &>/dev/null; then
-        SEC_UPDATES=$(dnf updateinfo list security 2>/dev/null | grep -c "security" || echo "0")
-        SEC_UPDATES="${SEC_UPDATES} 个安全更新"
+        SEC_UPDATES=$(dnf updateinfo list security 2>/dev/null | grep -c "security" || true)
     elif command -v yum &>/dev/null; then
-        SEC_UPDATES=$(yum updateinfo list security 2>/dev/null | grep -c "security" || echo "0")
-        SEC_UPDATES="${SEC_UPDATES} 个安全更新"
+        SEC_UPDATES=$(yum updateinfo list security 2>/dev/null | grep -c "security" || true)
     elif command -v apt &>/dev/null; then
-        SEC_UPDATES=$(apt list --upgradable 2>/dev/null | grep -ci "security" || echo "0")
-        SEC_UPDATES="${SEC_UPDATES} 个安全更新"
+        SEC_UPDATES=$(apt list --upgradable 2>/dev/null | grep -ci "security" || true)
     elif command -v zypper &>/dev/null; then
-        SEC_UPDATES=$(zypper list-updates --type patch 2>/dev/null | grep -c "security" || echo "0")
-        SEC_UPDATES="${SEC_UPDATES} 个安全更新"
+        SEC_UPDATES=$(zypper list-updates --type patch 2>/dev/null | grep -c "security" || true)
     fi
+    SEC_UPDATES=${SEC_UPDATES//[^0-9]/}; SEC_UPDATES=${SEC_UPDATES:-0}
+    SEC_UPDATES="${SEC_UPDATES} 个安全更新"
 
     if [[ "$OS_TYPE" == "kylin" ]]; then
         UPDATE_INFO="[Kylin] ${UPDATE_INFO}"
@@ -1185,8 +1194,8 @@ fi
 DMESG_CACHE=$(dmesg 2>/dev/null || true)
 
 # OOM 检查
-OOM_COUNT=$(echo "$DMESG_CACHE" | grep -ci "oom\|out of memory" 2>/dev/null | tr -d ' \n' || echo "0")
-OOM_COUNT=${OOM_COUNT:-0}
+OOM_COUNT=$(echo "$DMESG_CACHE" | grep -ci "oom\|out of memory" 2>/dev/null || true)
+OOM_COUNT=${OOM_COUNT//[^0-9]/}; OOM_COUNT=${OOM_COUNT:-0}
 if (( OOM_COUNT > 0 )); then
     log_warn "检测到 ${OOM_COUNT} 次 OOM 事件"
 fi
