@@ -18,6 +18,12 @@
 - **不假设环境**: 没 systemd? 没 iproute2? 没 sysstat? 没 docker? non-root 跑 dmesg? 全部自动 fallback
 - **工程师风**: 不要 emoji 装饰、不要营销腔、不要渐变光晕。表格、徽章、颜色码,够用
 
+## 报告样张
+
+![Linux 巡检报告样张](docs/report-preview.png)
+
+> 上图为某 Rocky Linux 实测报告的整页截图,工程师风扁平卡片 + 17 章节侧栏导航 + 进度条 + 徽章。HTML 输出可直接在浏览器打开、邮件转发或打印归档。
+
 ## 兼容性矩阵
 
 | 发行版 | 状态 | 备注 |
@@ -222,10 +228,10 @@ Linux_Auto_Inspection/
 ├── README.md                       # 本文件
 ├── CHANGELOG.md                    # 完整版本历史 (v2.0 → v2.5)
 ├── RELEASE_NOTES_v2.5.md           # v2.5 详细发布说明
-├── linux_inspect_script_analysis.md # 历史代码审查报告 (v2.0 → v2.3)
 ├── CONTRIBUTING.md                 # 贡献指南
 ├── LICENSE                         # MIT
-└── docs/                           # 示例报告截图等
+└── docs/
+    └── report-preview.png          # 报告样张
 ```
 
 ## License
