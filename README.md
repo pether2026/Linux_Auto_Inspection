@@ -1,11 +1,59 @@
 # Linux Auto Inspection
 
-**Linux 服务器一键巡检脚本** — 纯 Bash 编写,零依赖,自动适配主流发行版,输出工程师风 HTML 报告。
+> **Linux 服务器一键巡检脚本** — 纯 Bash 编写,零依赖,自动适配 30+ 主流发行版,生成工程师风 HTML 报告。
 
+[![Latest Release](https://img.shields.io/github/v/release/Aidan-996/Linux_Auto_Inspection?color=brightgreen&label=latest)](https://github.com/Aidan-996/Linux_Auto_Inspection/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/Shell-Bash%204.0%2B-green)](https://www.gnu.org/software/bash/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Linux-orange)]()
-[![Version](https://img.shields.io/badge/Version-v2.5-brightgreen)]()
+
+---
+
+## 目录
+
+- [最新版本 / 下载](#最新版本--下载)
+- [历史版本](#历史版本)
+- [为什么用它](#为什么用它)
+- [报告样张](#报告样张)
+- [兼容性矩阵](#兼容性矩阵)
+- [快速开始](#快速开始)
+- [命令行参数](#命令行参数)
+- [17 大类检查维度](#17-大类检查维度)
+- [兼容性设计 (v2.5 核心改进)](#兼容性设计-v25-核心改进)
+- [已修复的踩坑 (v2.5)](#已修复的踩坑-v25)
+- [文件结构](#文件结构)
+
+---
+
+## 最新版本 / 下载
+
+**最新稳定版: [v2.5 — Cross-Distribution Compatibility & Robustness](https://github.com/Aidan-996/Linux_Auto_Inspection/releases/latest)** (2026-05-25)
+
+```bash
+# 方式 1: git clone (推荐, 跟 .gitattributes 保持 LF 行尾)
+git clone https://github.com/Aidan-996/Linux_Auto_Inspection.git
+cd Linux_Auto_Inspection && bash linux_inspect.sh
+
+# 方式 2: wget 单文件 (无需 clone)
+wget -O linux_inspect.sh https://raw.githubusercontent.com/Aidan-996/Linux_Auto_Inspection/main/linux_inspect.sh
+chmod +x linux_inspect.sh && ./linux_inspect.sh
+
+# 方式 3: 一行流 (curl 拉 + 直接跑)
+curl -sL https://raw.githubusercontent.com/Aidan-996/Linux_Auto_Inspection/main/linux_inspect.sh | bash
+```
+
+> 如果脚本从 Windows 编辑过传过来出现 `syntax error near unexpected token '<'`, 一行命令兜底: `sed -i 's/\r$//' linux_inspect.sh`
+
+## 历史版本
+
+每个版本的**详细中文发布说明**都在 [Releases 页面](https://github.com/Aidan-996/Linux_Auto_Inspection/releases) 每个 tag 下面看到。也在仓库 `history/` 目录里归档了 markdown 副本。
+
+| 版本 | 日期 | 亮点 | 详细 |
+|---|---|---|---|
+| [**v2.5**](https://github.com/Aidan-996/Linux_Auto_Inspection/releases/tag/v2.5) | 2026-05-25 | **跨发行版兼容大改** (30+ 发行版) + 修 CentOS 7 CRLF + Rocky 9 pipefail 两个生产事故 + 4 个 helper + NTP/防火墙多源识别 + podman 兼容 | [release notes](history/RELEASE_NOTES_v2.5.md) |
+| [v2.4](https://github.com/Aidan-996/Linux_Auto_Inspection/releases/tag/v2.4) | 2026-05-10 | HTML 重构 (Token Insight 风) + 提速 60s→8-15s + 总体建议章节 + 命令行参数 | [release notes](history/RELEASE_NOTES_v2.4.md) |
+
+完整变更见 [CHANGELOG.md](CHANGELOG.md)。v2.0/v2.1/v2.2/v2.3 早期版本没有单独的 Release tag, 详情都在 CHANGELOG。
 
 ---
 
@@ -45,22 +93,9 @@
 
 ## 快速开始
 
-```bash
-# 方式 1: git clone (推荐, 自动跟 .gitattributes 保持 LF 行尾)
-git clone https://github.com/Aidan-996/Linux_Auto_Inspection.git
-cd Linux_Auto_Inspection
-bash linux_inspect.sh
+> 下载方式见 [最新版本 / 下载](#最新版本--下载)。下面是脚本跑起来后的标准输出。
 
-# 方式 2: wget 单文件
-wget -O linux_inspect.sh https://raw.githubusercontent.com/Aidan-996/Linux_Auto_Inspection/main/linux_inspect.sh
-chmod +x linux_inspect.sh
-./linux_inspect.sh
-
-# 方式 3: 一键 wget + 跑
-curl -sL https://raw.githubusercontent.com/Aidan-996/Linux_Auto_Inspection/main/linux_inspect.sh | bash
-```
-
-### 看截图 (默认输出)
+### 控制台输出示例
 
 ```
 ==============================================
