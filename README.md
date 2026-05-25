@@ -1,6 +1,8 @@
 # Linux Auto Inspection
 
-> **Linux 服务器一键巡检脚本** — 纯 Bash 编写,零依赖,自动适配 30+ 主流发行版,生成工程师风 HTML 报告。
+> Linux Auto Inspection 是一款面向运维与 SRE 的 Linux 服务器一键巡检工具。脚本采用纯 Bash 编写,无需安装任何依赖,可在 **CentOS / RHEL / Ubuntu / Debian / Rocky / AlmaLinux / openEuler / Kylin / Anolis** 等 30+ 主流发行版上开箱即用。
+>
+> 一条命令即可完成系统信息、硬件资源、性能负载、网络状态、磁盘 I/O、服务进程、安全基线、日志异常等多维度巡检,并自动输出一份结构清晰、可直接交付的工程师风格 HTML 报告,告别手工敲命令、复制粘贴拼报告的繁琐流程。
 
 [![Latest Release](https://img.shields.io/github/v/release/Aidan-996/Linux_Auto_Inspection?color=brightgreen&label=latest)](https://github.com/Aidan-996/Linux_Auto_Inspection/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
